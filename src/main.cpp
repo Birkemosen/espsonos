@@ -240,13 +240,20 @@ static void touch_reset()
     ESP_ERROR_CHECK(i2c_master_bus_rm_device(i2c));
     dev_cfg.device_address = 0x38;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &dev_cfg,&i2c));
-    // Reset the touch screen. It is recommended to reset the touch screen before using it.
-    write_buf = 0x2C;
+    // Pulse LCD_RST (EXIO3) low to reset ST7262 — required on warm reset since CH422G retains its output state
+    // 0x04: EXIO2(LCD_BL)=1, EXIO3(LCD_RST)=0, EXIO5(USB_SEL)=0
+    write_buf = 0x04;
     ESP_ERROR_CHECK(i2c_master_transmit(i2c,&write_buf,1,I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS));
-    esp_rom_delay_us(100 * 1000);
+    esp_rom_delay_us(20 * 1000);
+    // 0x0C: EXIO2(LCD_BL)=1, EXIO3(LCD_RST)=1, EXIO5(USB_SEL)=0 — release LCD_RST, keep TP_RST low
+    write_buf = 0x0C;
+    ESP_ERROR_CHECK(i2c_master_transmit(i2c,&write_buf,1,I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS));
+    esp_rom_delay_us(120 * 1000);
+    // GT911 touch reset: hold INT low before releasing TP_RST to select I2C address 0x5D
     gpio_set_level((gpio_num_t)GPIO_INPUT_IO_4, 0);
     esp_rom_delay_us(100 * 1000);
-    write_buf = 0x2E;
+    // 0x0E: EXIO1(TP_RST)=1, EXIO2(LCD_BL)=1, EXIO3(LCD_RST)=1, EXIO5(USB_SEL)=0 — release TP_RST
+    write_buf = 0x0E;
     ESP_ERROR_CHECK(i2c_master_transmit(i2c,&write_buf,1,I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS));
     esp_rom_delay_us(200 * 1000);
     ESP_ERROR_CHECK(i2c_master_bus_rm_device(i2c));

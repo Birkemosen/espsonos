@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "sonos_ui.h"
 #include "screens.h"
 #include "images.h"
 #include "actions.h"
@@ -473,10 +474,9 @@ ActionExecFunc actions[] = {
 };
 
 void ui_init() {
-    eez_flow_init(assets, sizeof(assets), (lv_obj_t **)&objects, sizeof(objects), images, sizeof(images), actions);
+    sonos_ui_init();
 }
 
 void ui_tick() {
-    eez_flow_tick();
-    tick_screen(g_currentScreen);
+    sonos_ui_tick();
 }
