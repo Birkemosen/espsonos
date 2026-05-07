@@ -202,7 +202,7 @@ static void lcd_initialize() {
         esp_timer_handle_t lvgl_tick_timer = NULL;
         ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
         ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, 2 * 1000));
-        xTaskCreate(lcd_lvgl_task, "lcd_task", 4096, NULL, 2, NULL);
+        xTaskCreate(lcd_lvgl_task, "lcd_task", 16384, NULL, 2, NULL);
 
 
 
