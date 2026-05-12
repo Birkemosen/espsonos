@@ -2,14 +2,15 @@
 #include <unistd.h>
 #include <sys/lock.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <esp_timer.h>
 #include <esp_idf_version.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_rgb.h>
 #include <esp_lcd_panel_vendor.h>
+#include <esp_heap_caps.h>
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
 #include <string.h>
@@ -30,10 +31,10 @@
 #define GPIO_INPUT_PIN_SEL  1ULL<<GPIO_INPUT_IO_4
 
 static esp_lcd_panel_handle_t lcd_handle = nullptr;
-static SemaphoreHandle_t sem_vsync_end;
-static SemaphoreHandle_t sem_gui_ready;
 // LVGL library is not thread-safe, this example will call LVGL APIs from different tasks, so use a mutex to protect it
 static _lock_t lvgl_api_lock;
+static SemaphoreHandle_t sem_vsync_end = NULL;
+static SemaphoreHandle_t sem_gui_ready = NULL;
 
 static void i2c_initialize()
 {
@@ -50,21 +51,28 @@ static void i2c_initialize()
 }
 
 
-static bool lcd_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_data)
-{
-    BaseType_t high_task_awoken = pdFALSE;
-
-    if (xSemaphoreTakeFromISR(sem_gui_ready, &high_task_awoken) == pdTRUE) {
-        xSemaphoreGiveFromISR(sem_vsync_end, &high_task_awoken);
-    }
-
-    return high_task_awoken == pdTRUE;
-}
 static void lcd_increase_lvgl_tick(void *arg)
 {
     /* Tell LVGL how many milliseconds has elapsed */
     lv_tick_inc(2);
 }
+
+static bool IRAM_ATTR lcd_vsync_event(esp_lcd_panel_handle_t panel,
+                                      const esp_lcd_rgb_panel_event_data_t *event_data,
+                                      void *user_ctx)
+{
+    BaseType_t high_task_awoken = pdFALSE;
+    (void)panel;
+    (void)event_data;
+    (void)user_ctx;
+    if (sem_gui_ready && sem_vsync_end) {
+        if (xSemaphoreTakeFromISR(sem_gui_ready, &high_task_awoken) == pdTRUE) {
+            xSemaphoreGiveFromISR(sem_vsync_end, &high_task_awoken);
+        }
+    }
+    return high_task_awoken == pdTRUE;
+}
+
 static void lvgl_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     esp_lcd_panel_handle_t panel_handle = lcd_handle;
@@ -73,8 +81,10 @@ static void lvgl_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_ma
     int offsety1 = area->y1;
     int offsety2 = area->y2;
 
-    xSemaphoreGive(sem_gui_ready);
-    xSemaphoreTake(sem_vsync_end, portMAX_DELAY);
+    if (sem_gui_ready && sem_vsync_end) {
+        xSemaphoreGive(sem_gui_ready);
+        xSemaphoreTake(sem_vsync_end, portMAX_DELAY);
+    }
 
     // pass the draw buffer to the driver
     esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
@@ -88,17 +98,24 @@ static void lcd_lvgl_task(void *arg)
     while (1) {
         _lock_acquire(&lvgl_api_lock);
         time_till_next_ms = lv_timer_handler();
+        ui_tick();
         _lock_release(&lvgl_api_lock);
-        usleep(1000 * time_till_next_ms);
+        if (time_till_next_ms == LV_NO_TIMER_READY || time_till_next_ms > 10) time_till_next_ms = 10;
+        if (time_till_next_ms < 2) time_till_next_ms = 2;
+        vTaskDelay(pdMS_TO_TICKS(time_till_next_ms));
     }
 }
 
 static void lcd_initialize() {
 
-    sem_vsync_end = xSemaphoreCreateBinary();
-    assert(sem_vsync_end);
-    sem_gui_ready = xSemaphoreCreateBinary();
-    assert(sem_gui_ready);
+    if (sem_vsync_end == NULL) {
+        sem_vsync_end = xSemaphoreCreateBinary();
+        assert(sem_vsync_end);
+    }
+    if (sem_gui_ready == NULL) {
+        sem_gui_ready = xSemaphoreCreateBinary();
+        assert(sem_gui_ready);
+    }
 
     #if LCD_PIN_NUM_BCKL >= 0
     gpio_config_t bk_gpio_config;
@@ -114,8 +131,7 @@ static void lcd_initialize() {
     memset(&panel_config,0,sizeof(esp_lcd_rgb_panel_config_t));
 
         panel_config.data_width = 16; // RGB565 in parallel mode, thus 16bit in width
-        //panel_config.dma_burst_size = 64;
-        panel_config.num_fbs = 1,
+        panel_config.dma_burst_size = 64;
         panel_config.clk_src = LCD_CLK_SRC_DEFAULT,
         panel_config.disp_gpio_num = -1,
         panel_config.pclk_gpio_num = LCD_PIN_NUM_CLK,
@@ -161,11 +177,17 @@ static void lcd_initialize() {
         panel_config.flags.no_fb = false;
         panel_config.flags.refresh_on_demand = false;
         panel_config.flags.fb_in_psram = true; // allocate frame buffer in PSRAM
-        //panel_config.sram_trans_align = 4;
-        //panel_config.psram_trans_align = 64;
+        // Two FBs in PSRAM (driver double-buffers automatically) + small bounce buffer.
+        // This was the working configuration; do not reduce to 1 — caused blank screen.
         panel_config.num_fbs = 2;
-        panel_config.bounce_buffer_size_px = LCD_HRES*(LCD_VRES/LCD_DIVISOR);
+        // Bounce buffer 10 lines (16 KB) — fits in the 32 KB internal DMA pool
+        // alongside other DMA users. Larger sizes can fail to allocate at boot.
+        panel_config.bounce_buffer_size_px = LCD_HRES * 10;
         ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, &panel_handle));
+        esp_lcd_rgb_panel_event_callbacks_t rgb_callbacks = {
+            .on_vsync = lcd_vsync_event,
+        };
+        ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &rgb_callbacks, NULL));
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
         lcd_handle = panel_handle;
@@ -175,25 +197,26 @@ static void lcd_initialize() {
         lv_init();
         // create a lvgl display
         lv_display_t *display = lv_display_create(LCD_HRES, LCD_VRES);
+        lv_display_set_antialiasing(display, false);
 
         // set color depth
         lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
         // create draw buffers
         void *buf1 = NULL;
-        // it's recommended to allocate the draw buffer from internal memory, for better performance
-        size_t draw_buffer_sz = LCD_HRES * 50 * sizeof(lv_color16_t);
+        // Larger partial draw buffer reduces chunk count per redraw, improving
+        // touch-triggered transition speed. Prefer internal RAM for bandwidth.
+        size_t draw_buffer_sz = LCD_HRES * 64 * sizeof(lv_color16_t);
 
-        buf1 = (lv_color_t *)heap_caps_malloc(draw_buffer_sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        buf1 = heap_caps_malloc(draw_buffer_sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!buf1) {
+            buf1 = heap_caps_malloc(draw_buffer_sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }
         assert(buf1);
         // set LVGL draw buffers and partial mode
         lv_display_set_buffers(display, buf1, NULL, draw_buffer_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
 
                 // set the callback which can copy the rendered image to an area of the display
         lv_display_set_flush_cb(display, lvgl_flush);
-        esp_lcd_rgb_panel_event_callbacks_t cbs;
-        memset(&cbs,0,sizeof(esp_lcd_rgb_panel_event_callbacks_t));
-        cbs.on_vsync = lcd_vsync_event;
-        ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, display));
         // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
         esp_timer_create_args_t lvgl_tick_timer_args;
         memset(&lvgl_tick_timer_args,0,sizeof(esp_timer_create_args_t));
@@ -202,13 +225,14 @@ static void lcd_initialize() {
         esp_timer_handle_t lvgl_tick_timer = NULL;
         ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
         ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, 2 * 1000));
-        xTaskCreate(lcd_lvgl_task, "lcd_task", 16384, NULL, 2, NULL);
-
-
 
         _lock_acquire(&lvgl_api_lock);
         ui_init();
         _lock_release(&lvgl_api_lock);
+
+        // Keep stack at the previously working size and fail fast if task creation fails.
+        BaseType_t task_ok = xTaskCreate(lcd_lvgl_task, "lcd_task", 16384, NULL, 2, NULL);
+        assert(task_ok == pdPASS);
 
 }
 esp_lcd_touch_handle_t touch_handle = NULL;
@@ -240,7 +264,9 @@ static void touch_reset()
     ESP_ERROR_CHECK(i2c_master_bus_rm_device(i2c));
     dev_cfg.device_address = 0x38;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &dev_cfg,&i2c));
-    // Pulse LCD_RST (EXIO3) low to reset ST7262 — required on warm reset since CH422G retains its output state
+    // CH422G EXIO bit map (Waveshare 4.3): bit1=TP_RST, bit2=LCD_BL, bit3=LCD_RST, bit5=USB_SEL.
+    // USB_SEL=0 selects USB-Serial-JTAG (visible to host as /dev/cu.usbmodem*).
+    // USB_SEL=1 selects USB-OTG and the device disappears from the host. Always 0 here.
     // 0x04: EXIO2(LCD_BL)=1, EXIO3(LCD_RST)=0, EXIO5(USB_SEL)=0
     write_buf = 0x04;
     ESP_ERROR_CHECK(i2c_master_transmit(i2c,&write_buf,1,I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS));
@@ -306,10 +332,6 @@ extern "C" void app_main() {
         if(touch_handle!=NULL) {
             esp_lcd_touch_read_data(touch_handle);
         }
-        _lock_acquire(&lvgl_api_lock);
-        lv_timer_handler();
-        ui_tick();
-        _lock_release(&lvgl_api_lock);
-        vTaskDelay(5);
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
