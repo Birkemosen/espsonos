@@ -550,14 +550,14 @@ static void create_panel_home(lv_obj_t *panel) {
         uint32_t color;      /* base color */
         uint32_t grad_color; /* gradient end color */
     } tiles[] = {
-        { "Now Playing", LV_SYMBOL_PLAY,     0,  0xE8A844, 0xD4921F }, /* Vibrant warm amber → darker */
-        { "Rooms",       LV_SYMBOL_LIST,     1,  0x4A8FD6, 0x2D69C0 }, /* Deeper blue → darker blue */
-        { "Music",       LV_SYMBOL_PLAY,     2,  0x1FA66D, 0x0D8B4D }, /* Deeper green → darker green */
-        { "Settings",    LV_SYMBOL_SETTINGS, 3,  0x8F3FC9, 0x6C2A9C }, /* Deep purple → darker */
-        { "Library",     LV_SYMBOL_DRIVE,   -1,  0xB52A2A, 0x7F1A1A }, /* Deep red → darker */
-        { "Queue",       LV_SYMBOL_LIST,    -1,  0x2ECFC0, 0x1BA89D }, /* Vibrant turquoise → darker */
-        { "Search",      MY_SYMBOL_SEARCH,  -1,  0xFF6A5A, 0xD94A3A }, /* Coral-red → darker */
-        { "Sleep",       MY_SYMBOL_MOON,    -1,  0x6C5B7B, 0x4A3D57 }, /* Sophisticated purple-gray → darker */
+        { "Now Playing", LV_SYMBOL_PLAY,     0,  0xE8A844, 0xD4921F }, /* Playback amber */
+        { "Rooms",       LV_SYMBOL_LIST,     1,  0x6D43B8, 0x4B2A8D }, /* Rooms deeper purple */
+        { "Music",       LV_SYMBOL_PLAY,     2,  0x1FA66D, 0x0D8B4D }, /* Music green */
+        { "Settings",    LV_SYMBOL_SETTINGS, 3,  0x7A8798, 0x5D6878 }, /* Neutral control gray */
+        { "Library",     LV_SYMBOL_DRIVE,   -1,  0xA3472B, 0x7C331F }, /* Book-like warm red-brown */
+        { "Queue",       LV_SYMBOL_LIST,    -1,  0x2ECFC0, 0x1BA89D }, /* Teal list/queue */
+        { "Search",      MY_SYMBOL_SEARCH,  -1,  0x4EA3FF, 0x2D7DDA }, /* Search blue */
+        { "Sleep",       MY_SYMBOL_MOON,    -1,  0x4F5D9A, 0x374173 }, /* Night indigo */
     };
 
     // 4 cols x 2 rows, 16 px margin, 8 px gap
